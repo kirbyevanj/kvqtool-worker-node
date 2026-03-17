@@ -53,6 +53,7 @@ func main() {
 	w.RegisterActivityWithOptions(acts.ConcatVideo, activity_options(types.ActivityConcatVideo))
 	w.RegisterActivityWithOptions(acts.GenerateReport, activity_options(types.ActivityGenerateReport))
 	w.RegisterActivityWithOptions(acts.FragmentedMP4Repackage, activity_options(types.ActivityFMP4Repackage))
+	w.RegisterActivityWithOptions(acts.RemoteEncodeX264, activity_options(types.ActivityRemoteEncX264))
 
 	logger.Info("worker started", "taskQueue", types.TemporalTaskQueue, "temporal", cfg.TemporalHost)
 	if err := w.Run(worker.InterruptCh()); err != nil {

@@ -69,6 +69,84 @@ func (a *Activities) ResourceUpload(ctx context.Context, input types.ActivityInp
 	return ok(input.NodeID, s3Key, map[string]string{"output_name": outputName}), nil
 }
 
+func (a *Activities) RemoteEncodeX264(ctx context.Context, input types.ActivityInput) (*types.ActivityOutput, error) {
+	s3Key := input.Params["s3_key"]
+	if s3Key == "" {
+		return fail(input.NodeID, "no s3_key (select input resource)"), nil
+	}
+
+	workDir := filepath.Join(a.TmpDir, input.NodeID)
+	os.MkdirAll(workDir, 0o755)
+	defer os.RemoveAll(workDir)
+
+	inputPath := filepath.Join(workDir, "input.mp4")
+	if err := a.S3.Download(ctx, s3Key, inputPath); err != nil {
+		return fail(input.NodeID, fmt.Sprintf("download: %s", err)), nil
+	}
+	activity.RecordHeartbeat(ctx, "downloaded")
+
+	outputPath := filepath.Join(workDir, "encoded.mp4")
+	pipelineStr := buildRemoteEncodePipeline(inputPath, outputPath, input.Params)
+	a.Logger.Info("RemoteEncodeX264", "pipeline", pipelineStr)
+
+	args := append([]string{"-e"}, strings.Fields(pipelineStr)...)
+	cmd := exec.CommandContext(ctx, "gst-launch-1.0", args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fail(input.NodeID, fmt.Sprintf("encode: %s: %s", err, string(out))), nil
+	}
+	activity.RecordHeartbeat(ctx, "encoded")
+
+	outputName := input.Params["output_name"]
+	if outputName == "" {
+		outputName = "encoded.mp4"
+	}
+	projectID := input.ProjectID
+	uploadKey := fmt.Sprintf("projects/%s/media/%s-%s", projectID, input.NodeID, outputName)
+
+	if err := a.S3.Upload(ctx, outputPath, uploadKey, "video/mp4"); err != nil {
+		return fail(input.NodeID, fmt.Sprintf("upload: %s", err)), nil
+	}
+	activity.RecordHeartbeat(ctx, "uploaded")
+
+	a.registerResource(ctx, projectID, outputName, uploadKey, "video/mp4")
+
+	return ok(input.NodeID, uploadKey, map[string]string{"output_name": outputName}), nil
+}
+
+func buildRemoteEncodePipeline(inputPath, outputPath string, params map[string]string) string {
+	pass := "quant"
+	encProps := ""
+	if bps, ok := params["bitrate_kbps"]; ok && bps != "" {
+		pass = "cbr"
+		encProps += " bitrate=" + bps
+	}
+	if crf, ok := params["crf"]; ok && crf != "" {
+		encProps += " quantizer=" + crf
+	}
+	preset := params["preset"]
+	if preset == "" {
+		preset = "medium"
+	}
+	encProps += " speed-preset=" + preset
+	if gop, ok := params["gop_length"]; ok && gop != "" {
+		encProps += " key-int-max=" + gop
+	}
+	if tune, ok := params["tune"]; ok && tune != "" {
+		encProps += " tune=" + tune
+	}
+
+	profile := params["profile"]
+	if profile == "" {
+		profile = "high"
+	}
+
+	src := fmt.Sprintf("filesrc location=%s ! decodebin", inputPath)
+
+	return fmt.Sprintf("%s ! videoconvert ! x264enc pass=%s%s ! video/x-h264,profile=%s ! mp4mux ! filesink location=%s",
+		src, pass, encProps, profile, outputPath)
+}
+
 func (a *Activities) registerResource(ctx context.Context, projectID, name, s3Key, contentType string) {
 	if a.ApiURL == "" {
 		return
