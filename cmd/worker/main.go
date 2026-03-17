@@ -42,6 +42,7 @@ func main() {
 	acts := &activities.Activities{
 		S3:     s3,
 		TmpDir: cfg.TempDir,
+		ApiURL: cfg.ApiURL,
 		Logger: logger,
 	}
 	w.RegisterActivityWithOptions(acts.ResourceDownload, activity_options(types.ActivityResDownload))

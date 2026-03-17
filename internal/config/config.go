@@ -15,6 +15,7 @@ type Config struct {
 	S3SecretKey  string
 	S3Region     string
 	TempDir      string
+	ApiURL       string
 	LogLevel     slog.Level
 }
 
@@ -28,6 +29,7 @@ func Load() *Config {
 		S3SecretKey:  envOr("KVQ_S3_SECRET_KEY", "kvqminiodev"),
 		S3Region:     envOr("KVQ_S3_REGION", "us-east-1"),
 		TempDir:      envOr("KVQ_TEMP_DIR", "/tmp/kvqtool"),
+		ApiURL:       envOr("KVQ_API_URL", "http://localhost:8080"),
 		LogLevel:     parseLogLevel(envOr("KVQ_LOG_LEVEL", "debug")),
 	}
 }

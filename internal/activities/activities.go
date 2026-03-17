@@ -2,7 +2,9 @@ package activities
 
 import (
 	"context"
+	"bytes"
 	"encoding/json"
+	"net/http"
 	"fmt"
 	"log/slog"
 	"os"
@@ -18,6 +20,7 @@ import (
 type Activities struct {
 	S3     *s3client.Client
 	TmpDir string
+	ApiURL string
 	Logger *slog.Logger
 }
 
@@ -60,8 +63,35 @@ func (a *Activities) ResourceUpload(ctx context.Context, input types.ActivityInp
 		return fail(input.NodeID, err.Error()), nil
 	}
 
+	a.registerResource(ctx, projectID, outputName, s3Key, contentType)
+
 	activity.RecordHeartbeat(ctx, "uploaded")
-	return ok(input.NodeID, s3Key, nil), nil
+	return ok(input.NodeID, s3Key, map[string]string{"output_name": outputName}), nil
+}
+
+func (a *Activities) registerResource(ctx context.Context, projectID, name, s3Key, contentType string) {
+	if a.ApiURL == "" {
+		return
+	}
+	body, _ := json.Marshal(map[string]string{
+		"filename":     name,
+		"content_type": contentType,
+		"s3_key":       s3Key,
+	})
+	url := fmt.Sprintf("%s/v1/projects/%s/resources/register", a.ApiURL, projectID)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	if err != nil {
+		a.Logger.Warn("register resource request failed", "err", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		a.Logger.Warn("register resource failed", "err", err)
+		return
+	}
+	resp.Body.Close()
+	a.Logger.Info("resource registered", "name", name, "s3_key", s3Key)
 }
 
 func (a *Activities) GStreamerEncode(ctx context.Context, input types.ActivityInput) (*types.ActivityOutput, error) {
