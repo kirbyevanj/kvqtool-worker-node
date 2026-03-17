@@ -73,11 +73,17 @@ func (c *Client) Upload(ctx context.Context, localPath, key, contentType string)
 	}
 	defer f.Close()
 
+	stat, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", localPath, err)
+	}
+
 	_, err = c.s3.PutObject(ctx, &s3.PutObjectInput{
-		Bucket:      aws.String(c.bucket),
-		Key:         aws.String(key),
-		Body:        f,
-		ContentType: aws.String(contentType),
+		Bucket:        aws.String(c.bucket),
+		Key:           aws.String(key),
+		Body:          f,
+		ContentType:   aws.String(contentType),
+		ContentLength: aws.Int64(stat.Size()),
 	})
 	if err != nil {
 		return fmt.Errorf("put object %s: %w", key, err)
