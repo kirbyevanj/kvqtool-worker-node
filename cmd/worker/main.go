@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/go-gst/go-gst/gst"
 	"github.com/kirbyevanj/kvqtool-kvq-models/types"
 	"github.com/kirbyevanj/kvqtool-worker-node/internal/activities"
 	"github.com/kirbyevanj/kvqtool-worker-node/internal/config"
@@ -17,7 +16,6 @@ import (
 )
 
 func main() {
-	gst.Init(nil)
 	cfg := config.Load()
 	logger := initLogger(cfg)
 

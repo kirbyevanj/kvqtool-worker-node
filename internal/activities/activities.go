@@ -9,9 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 
-	"github.com/go-gst/go-gst/gst"
 	"github.com/kirbyevanj/kvqtool-kvq-models/types"
 	"github.com/kirbyevanj/kvqtool-worker-node/internal/s3client"
 	"go.temporal.io/sdk/activity"
@@ -233,44 +231,13 @@ func buildEncodePipeline(inputPath, outputPath string, params map[string]string)
 }
 
 func runGstPipeline(ctx context.Context, pipelineStr string) error {
-	pipeline, err := gst.NewPipelineFromString(pipelineStr)
+	args := append([]string{"-e"}, strings.Fields(pipelineStr)...)
+	cmd := exec.CommandContext(ctx, "gst-launch-1.0", args...)
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("create pipeline: %w", err)
+		return fmt.Errorf("gst-launch: %s: %s", err, string(out))
 	}
-	defer pipeline.Unref()
-
-	bus := pipeline.GetBus()
-	defer bus.Unref()
-
-	if err := pipeline.SetState(gst.StatePlaying); err != nil {
-		return fmt.Errorf("set playing: %w", err)
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			pipeline.SetState(gst.StateNull)
-			return ctx.Err()
-		default:
-		}
-		msg := bus.TimedPop(gst.ClockTime(500 * time.Millisecond))
-		if msg == nil {
-			continue
-		}
-		switch msg.Type() {
-		case gst.MessageEOS:
-			msg.Unref()
-			pipeline.SetState(gst.StateNull)
-			return nil
-		case gst.MessageError:
-			gerr := msg.ParseError()
-			msg.Unref()
-			pipeline.SetState(gst.StateNull)
-			return fmt.Errorf("gst: %s", gerr.Error())
-		default:
-			msg.Unref()
-		}
-	}
+	return nil
 }
 
 func resolveUpstreamS3Key(input types.ActivityInput) string {
