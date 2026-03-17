@@ -19,6 +19,28 @@ func InterpreterWorkflow(ctx workflow.Context, dag types.WorkflowDAG) error {
 		return fmt.Errorf("topo sort: %w", err)
 	}
 
+	// Create a session to pin sequential activities to the same worker node.
+	// This allows local file I/O between stages without S3 round-trips.
+	sessCtx, err := workflow.CreateSession(ctx, &workflow.SessionOptions{
+		CreationTimeout:  5 * time.Minute,
+		ExecutionTimeout: 2 * time.Hour,
+	})
+	if err != nil {
+		return fmt.Errorf("create session: %w", err)
+	}
+	defer workflow.CompleteSession(sessCtx)
+
+	ao := workflow.ActivityOptions{
+		StartToCloseTimeout: 30 * time.Minute,
+		HeartbeatTimeout:    2 * time.Minute,
+		RetryPolicy: &temporal.RetryPolicy{
+			InitialInterval:    5 * time.Second,
+			BackoffCoefficient: 2.0,
+			MaximumAttempts:    3,
+		},
+	}
+	actCtx := workflow.WithActivityOptions(sessCtx, ao)
+
 	results := make(map[string]json.RawMessage)
 	totalNodes := len(sorted)
 
@@ -39,17 +61,6 @@ func InterpreterWorkflow(ctx workflow.Context, dag types.WorkflowDAG) error {
 			ProjectID:       node.Params["project_id"],
 			UpstreamResults: upstream,
 		}
-
-		ao := workflow.ActivityOptions{
-			StartToCloseTimeout: 30 * time.Minute,
-			HeartbeatTimeout:    2 * time.Minute,
-			RetryPolicy: &temporal.RetryPolicy{
-				InitialInterval:    5 * time.Second,
-				BackoffCoefficient: 2.0,
-				MaximumAttempts:    3,
-			},
-		}
-		actCtx := workflow.WithActivityOptions(ctx, ao)
 
 		var output types.ActivityOutput
 		err := workflow.ExecuteActivity(actCtx, node.Type, input).Get(ctx, &output)

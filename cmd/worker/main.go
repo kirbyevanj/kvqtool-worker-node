@@ -35,7 +35,9 @@ func main() {
 	}
 	defer tc.Close()
 
-	w := worker.New(tc, types.TemporalTaskQueue, worker.Options{})
+	w := worker.New(tc, types.TemporalTaskQueue, worker.Options{
+		EnableSessionWorker: true,
+	})
 
 	w.RegisterWorkflow(wf.InterpreterWorkflow)
 
