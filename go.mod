@@ -8,7 +8,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.12
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.97.1
 	github.com/go-gst/go-gst v1.4.0
-	github.com/kirbyevanj/kvqtool-kvq-models v0.0.0-20260317025343-900351b705ad
+	github.com/kirbyevanj/kvqtool-kvq-models v0.0.0-20260317032918-a8be5c7d3987
 	go.temporal.io/sdk v1.41.0
 )
 

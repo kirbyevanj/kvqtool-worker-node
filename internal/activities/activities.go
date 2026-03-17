@@ -23,13 +23,13 @@ type Activities struct {
 	Logger *slog.Logger
 }
 
-func (a *Activities) S3Download(ctx context.Context, input types.ActivityInput) (*types.ActivityOutput, error) {
+func (a *Activities) ResourceDownload(ctx context.Context, input types.ActivityInput) (*types.ActivityOutput, error) {
 	s3Key := input.Params["s3_key"]
 	if s3Key == "" {
 		s3Key = resolveUpstreamS3Key(input)
 	}
 	if s3Key == "" {
-		return fail(input.NodeID, "no s3_key in params or upstream"), nil
+		return fail(input.NodeID, "no s3_key in params or upstream (set resource_id in node config)"), nil
 	}
 
 	localPath := filepath.Join(a.TmpDir, input.NodeID, "input.mp4")
@@ -41,7 +41,7 @@ func (a *Activities) S3Download(ctx context.Context, input types.ActivityInput) 
 	return ok(input.NodeID, s3Key, map[string]string{"local_path": localPath}), nil
 }
 
-func (a *Activities) S3Upload(ctx context.Context, input types.ActivityInput) (*types.ActivityOutput, error) {
+func (a *Activities) ResourceUpload(ctx context.Context, input types.ActivityInput) (*types.ActivityOutput, error) {
 	localPath := input.Params["local_path"]
 	if localPath == "" {
 		localPath = resolveUpstreamLocalPath(input)

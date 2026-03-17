@@ -44,8 +44,8 @@ func main() {
 		TmpDir: cfg.TempDir,
 		Logger: logger,
 	}
-	w.RegisterActivityWithOptions(acts.S3Download, activity_options(types.ActivityS3Download))
-	w.RegisterActivityWithOptions(acts.S3Upload, activity_options(types.ActivityS3Upload))
+	w.RegisterActivityWithOptions(acts.ResourceDownload, activity_options(types.ActivityResDownload))
+	w.RegisterActivityWithOptions(acts.ResourceUpload, activity_options(types.ActivityResUpload))
 	w.RegisterActivityWithOptions(acts.GStreamerEncode, activity_options(types.ActivityGstEncode))
 	w.RegisterActivityWithOptions(acts.GStreamerMetrics, activity_options(types.ActivityGstMetrics))
 	w.RegisterActivityWithOptions(acts.SplitVideo, activity_options(types.ActivitySplitVideo))

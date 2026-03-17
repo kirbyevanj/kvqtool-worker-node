@@ -58,6 +58,10 @@ github.com/grpc-ecosystem/grpc-gateway/v2 v2.22.0 h1:asbCHRVmodnJTuQ3qamDwqVOIjw
 github.com/grpc-ecosystem/grpc-gateway/v2 v2.22.0/go.mod h1:ggCgvZ2r7uOoQjOyu2Y1NhHmEPPzzuhWgcza5M1Ji1I=
 github.com/kirbyevanj/kvqtool-kvq-models v0.0.0-20260317025343-900351b705ad h1:Fd5Bw2QDcw3TNfj90A+0ZEZo1p2CzU2hrG9vg5iUNQw=
 github.com/kirbyevanj/kvqtool-kvq-models v0.0.0-20260317025343-900351b705ad/go.mod h1:RkvwRbn8eFFl5ZW9f9wF/B1sa10XjbUXvID/aU1fezU=
+github.com/kirbyevanj/kvqtool-kvq-models v0.0.0-20260317030242-f616eaf70b1e h1:0eQwTSkfcI458bqJb2Whv0wYq8dDHBewAAZvzP9+SHU=
+github.com/kirbyevanj/kvqtool-kvq-models v0.0.0-20260317030242-f616eaf70b1e/go.mod h1:RkvwRbn8eFFl5ZW9f9wF/B1sa10XjbUXvID/aU1fezU=
+github.com/kirbyevanj/kvqtool-kvq-models v0.0.0-20260317032918-a8be5c7d3987 h1:7eFCgGUMte3IeW27Hxymf/yKlorNmjTkD9qa3+Twygs=
+github.com/kirbyevanj/kvqtool-kvq-models v0.0.0-20260317032918-a8be5c7d3987/go.mod h1:RkvwRbn8eFFl5ZW9f9wF/B1sa10XjbUXvID/aU1fezU=
 github.com/kisielk/errcheck v1.5.0/go.mod h1:pFxgyoBC7bSaBwPgfKdkLd5X25qrDl4LWUI2bnpBCr8=
 github.com/kisielk/gotool v1.0.0/go.mod h1:XhKaO+MFFWcvkIS/tQcRk01m1F5IRFswLeQ+oQHNcck=
 github.com/kr/pretty v0.3.1 h1:flRD4NNwYAUpkphVc1HcthR4KEIFJ65n8Mw5qdRn3LE=
