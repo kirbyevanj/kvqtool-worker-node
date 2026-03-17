@@ -143,8 +143,18 @@ func buildRemoteEncodePipeline(inputPath, outputPath string, params map[string]s
 
 	src := fmt.Sprintf("filesrc location=%s ! decodebin", inputPath)
 
-	return fmt.Sprintf("%s ! videoconvert ! x264enc pass=%s%s ! video/x-h264,profile=%s ! mp4mux ! filesink location=%s",
-		src, pass, encProps, profile, outputPath)
+	scaleChain := ""
+	scaleW := params["scale_width"]
+	scaleH := params["scale_height"]
+	scaleMethod := params["scale_method"]
+	if scaleW != "" && scaleH != "" && scaleMethod != "" {
+		scaleChain = fmt.Sprintf(" ! videoscale method=%s ! video/x-raw,width=%s,height=%s", scaleMethod, scaleW, scaleH)
+	} else if scaleW != "" && scaleH != "" {
+		scaleChain = fmt.Sprintf(" ! videoscale ! video/x-raw,width=%s,height=%s", scaleW, scaleH)
+	}
+
+	return fmt.Sprintf("%s ! videoconvert%s ! x264enc pass=%s%s ! video/x-h264,profile=%s ! mp4mux ! filesink location=%s",
+		src, scaleChain, pass, encProps, profile, outputPath)
 }
 
 func (a *Activities) registerResource(ctx context.Context, projectID, name, s3Key, contentType string) {
