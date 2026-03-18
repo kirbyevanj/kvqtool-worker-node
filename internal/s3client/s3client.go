@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -94,6 +95,21 @@ func (c *Client) Upload(ctx context.Context, localPath, key, contentType string)
 	}
 	c.logger.Debug("uploaded", "key", key, "src", localPath)
 	return nil
+}
+
+// PresignGet returns a presigned GET URL for the given key valid for the specified duration.
+// The URL can be passed directly to ffmpeg/ffprobe as an HTTP input, enabling HTTP range
+// requests so the tool can seek within the stream (required for MP4 container parsing).
+func (c *Client) PresignGet(ctx context.Context, key string, expiry time.Duration) (string, error) {
+	presigner := s3.NewPresignClient(c.s3)
+	req, err := presigner.PresignGetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(key),
+	}, s3.WithPresignExpires(expiry))
+	if err != nil {
+		return "", fmt.Errorf("presign %s: %w", key, err)
+	}
+	return req.URL, nil
 }
 
 // UploadStream uploads data from an io.Reader to S3 using multipart upload.

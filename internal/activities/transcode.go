@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 
 	"github.com/kirbyevanj/kvqtool-kvq-models/types"
 	"go.temporal.io/sdk/activity"
@@ -44,8 +45,8 @@ func (a *Activities) X264Transcode(ctx context.Context, input types.ActivityInpu
 	return ok(input.NodeID, "", map[string]string{"local_path": outputPath}), nil
 }
 
-// X264RemoteTranscode streams from S3 → ffmpeg stdin → ffmpeg stdout → S3 multipart upload.
-// No temp file is written to disk. Fragmented MP4 output enables streaming to S3.
+// X264RemoteTranscode uses a presigned S3 URL as ffmpeg input (seekable via HTTP range requests),
+// and streams the fragmented MP4 output directly to S3 multipart upload. No temp files.
 func (a *Activities) X264RemoteTranscode(ctx context.Context, input types.ActivityInput) (*types.ActivityOutput, error) {
 	s3Key := input.Params["s3_key"]
 	if s3Key == "" {
@@ -61,21 +62,18 @@ func (a *Activities) X264RemoteTranscode(ctx context.Context, input types.Activi
 	}
 	uploadKey := fmt.Sprintf("projects/%s/media/%s-%s", input.ProjectID, input.NodeID, outputName)
 
-	// Build ffmpeg args for x264 encoding from stdin to stdout.
-	// Trim params placed after -i so they work on non-seekable stdin.
-	args := buildFFmpegX264StreamArgs(input.Params)
-	a.Logger.Info("x264RemoteTranscode stream", "args", args)
-
-	// Connect: S3 reader → ffmpeg stdin → ffmpeg stdout → S3 multipart upload.
-	s3Reader, err := a.S3.GetReader(ctx, s3Key)
+	// Presigned URL allows ffmpeg to seek via HTTP range requests (required for MP4 moov atom).
+	presignedURL, err := a.S3.PresignGet(ctx, s3Key, 2*time.Hour)
 	if err != nil {
-		return fail(input.NodeID, fmt.Sprintf("s3 open: %s", err)), nil
+		return fail(input.NodeID, fmt.Sprintf("presign: %s", err)), nil
 	}
-	defer s3Reader.Close()
 
+	args := buildFFmpegX264StreamArgs(presignedURL, input.Params)
+	a.Logger.Info("x264RemoteTranscode", "s3_key", s3Key)
+
+	// ffmpeg reads from presigned URL (HTTP), writes fragmented MP4 to stdout.
 	pr, pw := io.Pipe()
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
-	cmd.Stdin = s3Reader
 	cmd.Stdout = pw
 
 	if err := cmd.Start(); err != nil {
@@ -84,7 +82,6 @@ func (a *Activities) X264RemoteTranscode(ctx context.Context, input types.Activi
 		return fail(input.NodeID, fmt.Sprintf("ffmpeg start: %s", err)), nil
 	}
 
-	// Close the write-end of the pipe when ffmpeg exits (success or error).
 	go func() {
 		err := cmd.Wait()
 		pw.CloseWithError(err)
@@ -100,10 +97,11 @@ func (a *Activities) X264RemoteTranscode(ctx context.Context, input types.Activi
 	return ok(input.NodeID, uploadKey, map[string]string{"output_name": outputName}), nil
 }
 
-// buildFFmpegX264StreamArgs constructs ffmpeg args for stdin→stdout x264 encoding.
-// Input is read from pipe:0; output is fragmented MP4 written to pipe:1.
-func buildFFmpegX264StreamArgs(params map[string]string) []string {
-	args := []string{"-y", "-i", "pipe:0"}
+// buildFFmpegX264StreamArgs constructs ffmpeg args for URL→stdout x264 encoding.
+// inputURL may be a presigned HTTP URL or a local file path.
+// Output is fragmented MP4 written to pipe:1 (stdout).
+func buildFFmpegX264StreamArgs(inputURL string, params map[string]string) []string {
+	args := []string{"-y", "-i", inputURL}
 
 	// Decode-based trim (works on non-seekable stdin, placed after -i).
 	if params["start_time"] != "" {

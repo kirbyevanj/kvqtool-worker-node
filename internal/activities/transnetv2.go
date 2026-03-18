@@ -55,7 +55,13 @@ func (a *Activities) TransnetV2SceneCut(ctx context.Context, input types.Activit
 	return okJSON(input.NodeID, "", scf), nil
 }
 
-// runTransnetV2InferenceFile extracts frames from a local file and runs ONNX inference.
+// runTransnetV2InferenceURL extracts frames from an HTTP URL (presigned S3) and runs ONNX inference.
+// The URL must be seekable (HTTP range requests), which enables ffmpeg to parse the container.
+func (a *Activities) runTransnetV2InferenceURL(ctx context.Context, inputURL, source string, threshold float64, frameW, frameH int) (*types.SceneCutFile, error) {
+	return a.runTransnetV2InferenceFile(ctx, inputURL, source, threshold, frameW, frameH)
+}
+
+// runTransnetV2InferenceFile extracts frames from a local file or HTTP URL and runs ONNX inference.
 func (a *Activities) runTransnetV2InferenceFile(ctx context.Context, inputPath, source string, threshold float64, frameW, frameH int) (*types.SceneCutFile, error) {
 	workDir := filepath.Join(a.TmpDir, "transnetv2-"+filepath.Base(inputPath))
 	os.MkdirAll(workDir, 0o755)

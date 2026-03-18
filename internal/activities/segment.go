@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/kirbyevanj/kvqtool-kvq-models/types"
 	"go.temporal.io/sdk/activity"
@@ -30,7 +31,7 @@ func (a *Activities) SegmentMedia(ctx context.Context, input types.ActivityInput
 	return okJSON(input.NodeID, "", scf), nil
 }
 
-// RemoteSegmentMedia streams from S3 → ffprobe stdin to get duration (no temp file).
+// RemoteSegmentMedia uses a presigned S3 URL for ffprobe to determine duration (seekable).
 // Segments are computed in-memory and the JSON result is uploaded directly.
 func (a *Activities) RemoteSegmentMedia(ctx context.Context, input types.ActivityInput) (*types.ActivityOutput, error) {
 	s3Key := input.Params["s3_key"]
@@ -41,13 +42,12 @@ func (a *Activities) RemoteSegmentMedia(ctx context.Context, input types.Activit
 		return fail(input.NodeID, "no s3_key"), nil
 	}
 
-	r, err := a.S3.GetReader(ctx, s3Key)
+	presignedURL, err := a.S3.PresignGet(ctx, s3Key, 1*time.Hour)
 	if err != nil {
-		return fail(input.NodeID, fmt.Sprintf("s3 open: %s", err)), nil
+		return fail(input.NodeID, fmt.Sprintf("presign: %s", err)), nil
 	}
-	defer r.Close()
 
-	duration, err := probeDurationFromReader(ctx, r)
+	duration, err := probeDuration(ctx, presignedURL)
 	if err != nil {
 		return fail(input.NodeID, fmt.Sprintf("probe duration: %s", err)), nil
 	}

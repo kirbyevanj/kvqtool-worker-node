@@ -5,11 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/kirbyevanj/kvqtool-kvq-models/types"
 	"go.temporal.io/sdk/activity"
@@ -34,8 +33,8 @@ func (a *Activities) SceneCut(ctx context.Context, input types.ActivityInput) (*
 	return okJSON(input.NodeID, "", scf), nil
 }
 
-// RemoteSceneCut streams from S3 → TransnetV2 frame extraction (no MP4 temp file).
-// Falls back to materializing the file for ffprobe scene detection when no ONNX model is configured.
+// RemoteSceneCut uses a presigned S3 URL for TransnetV2 frame extraction (seekable).
+// Falls back to ffprobe scene detection (also via presigned URL) when no ONNX model is set.
 func (a *Activities) RemoteSceneCut(ctx context.Context, input types.ActivityInput) (*types.ActivityOutput, error) {
 	s3Key := input.Params["s3_key"]
 	if s3Key == "" {
@@ -47,36 +46,23 @@ func (a *Activities) RemoteSceneCut(ctx context.Context, input types.ActivityInp
 
 	threshold, fw, fh := transnetParams(input.Params)
 
+	presignedURL, err := a.S3.PresignGet(ctx, s3Key, 2*time.Hour)
+	if err != nil {
+		return fail(input.NodeID, fmt.Sprintf("presign: %s", err)), nil
+	}
+
 	var scf *types.SceneCutFile
 
 	if a.TransnetModel != "" {
-		// Streaming path: S3 GetObject → ffmpeg stdin for frame extraction.
-		r, err := a.S3.GetReader(ctx, s3Key)
+		scf, err = a.runTransnetV2InferenceURL(ctx, presignedURL, s3Key, threshold, fw, fh)
 		if err != nil {
-			return fail(input.NodeID, fmt.Sprintf("s3 open: %s", err)), nil
-		}
-		scf, err = a.runTransnetV2InferenceStream(ctx, r, s3Key, threshold, fw, fh)
-		r.Close()
-		if err != nil {
-			a.Logger.Warn("RemoteSceneCut: TransnetV2 stream failed, falling back to ffprobe download", "err", err)
+			a.Logger.Warn("RemoteSceneCut: TransnetV2 failed, falling back to ffprobe", "err", err)
 			scf = nil
 		}
 	}
 
 	if scf == nil {
-		// ffprobe fallback: needs a seekable file.
-		workDir := filepath.Join(a.TmpDir, input.NodeID)
-		os.MkdirAll(workDir, 0o755)
-		defer os.RemoveAll(workDir)
-
-		localPath := filepath.Join(workDir, "input.mp4")
-		if err := a.S3.Download(ctx, s3Key, localPath); err != nil {
-			return fail(input.NodeID, fmt.Sprintf("download: %s", err)), nil
-		}
-		activity.RecordHeartbeat(ctx, "downloaded (fallback)")
-
-		var err error
-		scf, err = a.runSceneCutDetection(ctx, localPath, map[string]string{
+		scf, err = a.runSceneCutDetection(ctx, presignedURL, map[string]string{
 			"threshold": fmt.Sprintf("%.2f", threshold),
 		})
 		if err != nil {
