@@ -18,6 +18,7 @@ import (
 )
 
 // FileMetricAnalysis computes VMAF/SSIM/PSNR on local reference and distorted files using ffmpeg.
+// The JSON report is written to disk so a downstream ResourceUpload node can read it via local_path.
 func (a *Activities) FileMetricAnalysis(ctx context.Context, input types.ActivityInput) (*types.ActivityOutput, error) {
 	refPath := input.Params["reference_path"]
 	if refPath == "" {
@@ -33,14 +34,31 @@ func (a *Activities) FileMetricAnalysis(ctx context.Context, input types.Activit
 
 	workDir := filepath.Join(a.TmpDir, input.NodeID)
 	os.MkdirAll(workDir, 0o755)
-	defer os.RemoveAll(workDir)
+	// workDir is intentionally NOT deferred-removed: the output file must persist
+	// so a downstream ResourceUpload activity can read it via local_path.
 
 	report, err := a.runFFmpegMetrics(ctx, refPath, distPath, workDir, input.Params)
 	if err != nil {
+		os.RemoveAll(workDir)
 		return fail(input.NodeID, fmt.Sprintf("metrics: %s", err)), nil
 	}
+
+	outputName := input.Params["output_name"]
+	if outputName == "" {
+		outputName = "metrics.json"
+	}
+	reportPath := filepath.Join(workDir, outputName)
+	reportJSON, _ := json.MarshalIndent(report, "", "  ")
+	if err := os.WriteFile(reportPath, reportJSON, 0o644); err != nil {
+		os.RemoveAll(workDir)
+		return fail(input.NodeID, fmt.Sprintf("write report: %s", err)), nil
+	}
+
 	activity.RecordHeartbeat(ctx, "metrics complete")
-	return okJSON(input.NodeID, "", report), nil
+	return ok(input.NodeID, "", map[string]string{
+		"local_path":  reportPath,
+		"output_name": outputName,
+	}), nil
 }
 
 // RemoteFileMetricAnalysis uses presigned S3 URLs as ffmpeg inputs — no temp file downloads.
