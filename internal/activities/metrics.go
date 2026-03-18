@@ -139,31 +139,29 @@ func (a *Activities) runFFmpegMetrics(ctx context.Context, refInput, distInput, 
 	}, nil
 }
 
-// runFFmpegSSIMPSNR computes SSIM and/or PSNR in a single ffmpeg pass using a split filtergraph.
-// Summary statistics are parsed from ffmpeg's stderr output.
+// runFFmpegSSIMPSNR computes SSIM and/or PSNR in a single ffmpeg pass.
+// scale2ref scales the distorted stream to the reference resolution so that
+// SSIM/PSNR filters (which require identical dimensions) never fail on
+// mismatched inputs (e.g. 1920x1080 reference vs 1280x720 distorted).
 func runFFmpegSSIMPSNR(ctx context.Context, refInput, distInput string, doSSIM, doPSNR bool) (ssim, psnr float64, err error) {
-	var args []string
+	var filter string
+	var mapArgs []string
 	if doSSIM && doPSNR {
-		args = []string{
-			"-y", "-i", refInput, "-i", distInput,
-			"-filter_complex", "[0:v]split=2[r0][r1];[1:v]split=2[d0][d1];[r0][d0]ssim[vs];[r1][d1]psnr[vp]",
-			"-map", "[vs]", "-f", "null", "/dev/null",
-			"-map", "[vp]", "-f", "null", "/dev/null",
-		}
+		// scale2ref: [to_scale][size_ref] → [scaled][ref_pass]
+		filter = "[1:v][0:v]scale2ref[ds][r];" +
+			"[r]split=2[r0][r1];" +
+			"[ds]split=2[d0][d1];" +
+			"[r0][d0]ssim[vs];" +
+			"[r1][d1]psnr[vp]"
+		mapArgs = []string{"-map", "[vs]", "-f", "null", "/dev/null", "-map", "[vp]", "-f", "null", "/dev/null"}
 	} else if doSSIM {
-		args = []string{
-			"-y", "-i", refInput, "-i", distInput,
-			"-filter_complex", "[0:v][1:v]ssim[vs]",
-			"-map", "[vs]", "-f", "null", "/dev/null",
-		}
+		filter = "[1:v][0:v]scale2ref[ds][r];[r][ds]ssim[vs]"
+		mapArgs = []string{"-map", "[vs]", "-f", "null", "/dev/null"}
 	} else {
-		args = []string{
-			"-y", "-i", refInput, "-i", distInput,
-			"-filter_complex", "[0:v][1:v]psnr[vp]",
-			"-map", "[vp]", "-f", "null", "/dev/null",
-		}
+		filter = "[1:v][0:v]scale2ref[ds][r];[r][ds]psnr[vp]"
+		mapArgs = []string{"-map", "[vp]", "-f", "null", "/dev/null"}
 	}
-
+	args := append([]string{"-y", "-i", refInput, "-i", distInput, "-filter_complex", filter}, mapArgs...)
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = &stderrBuf
@@ -182,9 +180,12 @@ func runFFmpegSSIMPSNR(ctx context.Context, refInput, distInput string, doSSIM, 
 }
 
 // runFFmpegVMAF runs libvmaf and returns the pooled mean VMAF score from the JSON log.
+// scale2ref ensures the distorted stream matches reference resolution before comparison.
+// libvmaf input order: [distorted][reference].
 func runFFmpegVMAF(ctx context.Context, refInput, distInput, tmpDir string) (float64, error) {
 	vmafLog := filepath.Join(tmpDir, "vmaf.json")
-	filter := fmt.Sprintf("[0:v][1:v]libvmaf=log_path=%s:log_fmt=json[vmafout]", vmafLog)
+	// [1:v]=distorted, [0:v]=reference; scale2ref outputs [ds]=scaled_dist, [r]=ref.
+	filter := fmt.Sprintf("[1:v][0:v]scale2ref[ds][r];[ds][r]libvmaf=log_path=%s:log_fmt=json[vmafout]", vmafLog)
 	args := []string{
 		"-y", "-i", refInput, "-i", distInput,
 		"-filter_complex", filter,
