@@ -1,18 +1,23 @@
 package activities
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/kirbyevanj/kvqtool-kvq-models/types"
 	"go.temporal.io/sdk/activity"
-	"golang.org/x/sync/errgroup"
 )
 
-// FileMetricAnalysis runs VMAF/SSIM/PSNR on local reference and distorted files.
+// FileMetricAnalysis computes VMAF/SSIM/PSNR on local reference and distorted files using ffmpeg.
 func (a *Activities) FileMetricAnalysis(ctx context.Context, input types.ActivityInput) (*types.ActivityOutput, error) {
 	refPath := input.Params["reference_path"]
 	if refPath == "" {
@@ -26,27 +31,20 @@ func (a *Activities) FileMetricAnalysis(ctx context.Context, input types.Activit
 		return fail(input.NodeID, "reference_path and distorted_path required"), nil
 	}
 
-	pipeline := buildMetricPipeline(refPath, distPath, input.Params)
-	a.Logger.Info("FileMetricAnalysis", "pipeline", pipeline)
+	workDir := filepath.Join(a.TmpDir, input.NodeID)
+	os.MkdirAll(workDir, 0o755)
+	defer os.RemoveAll(workDir)
 
-	if err := runGstPipeline(ctx, pipeline); err != nil {
+	report, err := a.runFFmpegMetrics(ctx, refPath, distPath, workDir, input.Params)
+	if err != nil {
 		return fail(input.NodeID, fmt.Sprintf("metrics: %s", err)), nil
 	}
-
-	report := buildMetricReport(refPath, distPath, input.Params)
-
-	outputDir := filepath.Join(a.TmpDir, input.NodeID)
-	os.MkdirAll(outputDir, 0o755)
-	reportPath := filepath.Join(outputDir, "metrics.json")
-	reportJSON, _ := json.MarshalIndent(report, "", "  ")
-	os.WriteFile(reportPath, reportJSON, 0o644)
-
 	activity.RecordHeartbeat(ctx, "metrics complete")
 	return okJSON(input.NodeID, "", report), nil
 }
 
-// RemoteFileMetricAnalysis concurrently streams both S3 objects, runs metrics, and uploads the report.
-// Both downloads start simultaneously and write to temp files (GStreamer iqa requires seekable inputs).
+// RemoteFileMetricAnalysis uses presigned S3 URLs as ffmpeg inputs — no temp file downloads.
+// ffmpeg can seek both streams via HTTP range requests, enabling accurate metric computation.
 func (a *Activities) RemoteFileMetricAnalysis(ctx context.Context, input types.ActivityInput) (*types.ActivityOutput, error) {
 	refKey := input.Params["reference_s3_key"]
 	distKey := input.Params["distorted_s3_key"]
@@ -54,52 +52,32 @@ func (a *Activities) RemoteFileMetricAnalysis(ctx context.Context, input types.A
 		return fail(input.NodeID, "reference_s3_key and distorted_s3_key required"), nil
 	}
 
+	refURL, err := a.S3.PresignGet(ctx, refKey, 2*time.Hour)
+	if err != nil {
+		return fail(input.NodeID, fmt.Sprintf("presign ref: %s", err)), nil
+	}
+	distURL, err := a.S3.PresignGet(ctx, distKey, 2*time.Hour)
+	if err != nil {
+		return fail(input.NodeID, fmt.Sprintf("presign dist: %s", err)), nil
+	}
+	activity.RecordHeartbeat(ctx, "presigned")
+
 	workDir := filepath.Join(a.TmpDir, input.NodeID)
 	os.MkdirAll(workDir, 0o755)
 	defer os.RemoveAll(workDir)
 
-	refPath := filepath.Join(workDir, "reference.mp4")
-	distPath := filepath.Join(workDir, "distorted.mp4")
-
-	// Download both streams simultaneously.
-	eg, dlCtx := errgroup.WithContext(ctx)
-	eg.Go(func() error {
-		if err := a.S3.Download(dlCtx, refKey, refPath); err != nil {
-			return fmt.Errorf("download ref: %w", err)
-		}
-		return nil
-	})
-	eg.Go(func() error {
-		if err := a.S3.Download(dlCtx, distKey, distPath); err != nil {
-			return fmt.Errorf("download dist: %w", err)
-		}
-		return nil
-	})
-	if err := eg.Wait(); err != nil {
-		return fail(input.NodeID, err.Error()), nil
-	}
-	activity.RecordHeartbeat(ctx, "both downloads complete")
-
-	pipeline := buildMetricPipeline(refPath, distPath, input.Params)
-	a.Logger.Info("RemoteFileMetricAnalysis", "pipeline", pipeline)
-
-	if err := runGstPipeline(ctx, pipeline); err != nil {
+	report, err := a.runFFmpegMetrics(ctx, refURL, distURL, workDir, input.Params)
+	if err != nil {
 		return fail(input.NodeID, fmt.Sprintf("metrics: %s", err)), nil
 	}
 
-	report := buildMetricReport(refPath, distPath, input.Params)
 	reportJSON, _ := json.MarshalIndent(report, "", "  ")
-
 	reportName := input.Params["output_name"]
 	if reportName == "" {
 		reportName = "metrics.json"
 	}
 	uploadKey := fmt.Sprintf("projects/%s/media/%s-%s", input.ProjectID, input.NodeID, reportName)
-
-	reportPath := filepath.Join(workDir, reportName)
-	os.WriteFile(reportPath, reportJSON, 0o644)
-
-	if err := a.S3.Upload(ctx, reportPath, uploadKey, "application/json"); err != nil {
+	if err := a.S3.UploadStream(ctx, bytes.NewReader(reportJSON), uploadKey, "application/json"); err != nil {
 		return fail(input.NodeID, fmt.Sprintf("upload: %s", err)), nil
 	}
 	activity.RecordHeartbeat(ctx, "uploaded")
@@ -108,15 +86,43 @@ func (a *Activities) RemoteFileMetricAnalysis(ctx context.Context, input types.A
 	return okJSON(input.NodeID, uploadKey, report), nil
 }
 
-func buildMetricReport(refPath, distPath string, params map[string]string) *types.MetricReports {
+// runFFmpegMetrics computes enabled metrics via ffmpeg's ssim, psnr, and libvmaf filters.
+// refInput and distInput may be local file paths or HTTP presigned URLs.
+func (a *Activities) runFFmpegMetrics(ctx context.Context, refInput, distInput, tmpDir string, params map[string]string) (*types.MetricReports, error) {
+	doVMAF := params["vmaf"] != "false"
+	doSSIM := params["ssim"] != "false"
+	doPSNR := params["psnr"] != "false"
+
+	var vmafMean, ssimAll, psnrAvg float64
+
+	if doSSIM || doPSNR {
+		s, p, err := runFFmpegSSIMPSNR(ctx, refInput, distInput, doSSIM, doPSNR)
+		if err != nil {
+			return nil, fmt.Errorf("ssim/psnr: %w", err)
+		}
+		ssimAll = s
+		psnrAvg = p
+	}
+
+	if doVMAF {
+		v, err := runFFmpegVMAF(ctx, refInput, distInput, tmpDir)
+		if err != nil {
+			// libvmaf is optional; degrade gracefully so the activity still succeeds.
+			a.Logger.Warn("VMAF failed (libvmaf may not be available in this ffmpeg build)", "err", err)
+			doVMAF = false
+		} else {
+			vmafMean = v
+		}
+	}
+
 	var metrics []string
-	if params["vmaf"] != "false" {
+	if doVMAF {
 		metrics = append(metrics, "vmaf")
 	}
-	if params["ssim"] != "false" {
+	if doSSIM {
 		metrics = append(metrics, "ssim")
 	}
-	if params["psnr"] != "false" {
+	if doPSNR {
 		metrics = append(metrics, "psnr")
 	}
 
@@ -124,11 +130,132 @@ func buildMetricReport(refPath, distPath string, params map[string]string) *type
 		Header: types.MetricHeader{
 			Version:   "0.1",
 			Metrics:   metrics,
-			Reference: filepath.Base(refPath),
-			Dist:      map[string]string{"0": filepath.Base(distPath)},
+			Reference: sourceLabel(refInput),
+			Dist:      map[string]string{"0": sourceLabel(distInput)},
 		},
-		Vmaf: map[string]map[string]string{"0": {}},
-		Ssim: map[string]map[string]string{"0": {}},
-		Psnr: map[string]map[string]string{"0": {}},
+		Vmaf: map[string]map[string]string{"0": {"mean": fmt.Sprintf("%.4f", vmafMean)}},
+		Ssim: map[string]map[string]string{"0": {"mean": fmt.Sprintf("%.6f", ssimAll)}},
+		Psnr: map[string]map[string]string{"0": {"average": fmt.Sprintf("%.4f", psnrAvg)}},
+	}, nil
+}
+
+// runFFmpegSSIMPSNR computes SSIM and/or PSNR in a single ffmpeg pass using a split filtergraph.
+// Summary statistics are parsed from ffmpeg's stderr output.
+func runFFmpegSSIMPSNR(ctx context.Context, refInput, distInput string, doSSIM, doPSNR bool) (ssim, psnr float64, err error) {
+	var args []string
+	if doSSIM && doPSNR {
+		args = []string{
+			"-y", "-i", refInput, "-i", distInput,
+			"-filter_complex", "[0:v]split=2[r0][r1];[1:v]split=2[d0][d1];[r0][d0]ssim[vs];[r1][d1]psnr[vp]",
+			"-map", "[vs]", "-f", "null", "/dev/null",
+			"-map", "[vp]", "-f", "null", "/dev/null",
+		}
+	} else if doSSIM {
+		args = []string{
+			"-y", "-i", refInput, "-i", distInput,
+			"-filter_complex", "[0:v][1:v]ssim[vs]",
+			"-map", "[vs]", "-f", "null", "/dev/null",
+		}
+	} else {
+		args = []string{
+			"-y", "-i", refInput, "-i", distInput,
+			"-filter_complex", "[0:v][1:v]psnr[vp]",
+			"-map", "[vp]", "-f", "null", "/dev/null",
+		}
 	}
+
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+	if runErr := cmd.Run(); runErr != nil {
+		return 0, 0, fmt.Errorf("ffmpeg: %w: %s", runErr, stderrBuf.String())
+	}
+
+	out := stderrBuf.String()
+	if doSSIM {
+		ssim = parseSSIMFromStderr(out)
+	}
+	if doPSNR {
+		psnr = parsePSNRFromStderr(out)
+	}
+	return ssim, psnr, nil
+}
+
+// runFFmpegVMAF runs libvmaf and returns the pooled mean VMAF score from the JSON log.
+func runFFmpegVMAF(ctx context.Context, refInput, distInput, tmpDir string) (float64, error) {
+	vmafLog := filepath.Join(tmpDir, "vmaf.json")
+	filter := fmt.Sprintf("[0:v][1:v]libvmaf=log_path=%s:log_fmt=json[vmafout]", vmafLog)
+	args := []string{
+		"-y", "-i", refInput, "-i", distInput,
+		"-filter_complex", filter,
+		"-map", "[vmafout]", "-f", "null", "/dev/null",
+	}
+
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+	if runErr := cmd.Run(); runErr != nil {
+		return 0, fmt.Errorf("ffmpeg vmaf: %w: %s", runErr, stderrBuf.String())
+	}
+	return parseVMAFFromLog(vmafLog)
+}
+
+// parseSSIMFromStderr extracts the all-channel SSIM mean from ffmpeg stderr.
+// ffmpeg prints: "SSIM Mean Y:0.987654 (18.97) ... All:0.989123 (19.58)"
+var ssimAllRe = regexp.MustCompile(`\bAll:(\d+\.\d+)`)
+
+func parseSSIMFromStderr(s string) float64 {
+	m := ssimAllRe.FindStringSubmatch(s)
+	if len(m) < 2 {
+		return 0
+	}
+	v, _ := strconv.ParseFloat(m[1], 64)
+	return v
+}
+
+// parsePSNRFromStderr extracts the average PSNR from ffmpeg stderr.
+// ffmpeg prints: "PSNR y:43.97 ... average:44.80 min:38.43 max:68.07"
+var psnrAvgRe = regexp.MustCompile(`\baverage:(\d+\.\d+)`)
+
+func parsePSNRFromStderr(s string) float64 {
+	m := psnrAvgRe.FindStringSubmatch(s)
+	if len(m) < 2 {
+		return 0
+	}
+	v, _ := strconv.ParseFloat(m[1], 64)
+	return v
+}
+
+// parseVMAFFromLog reads the pooled mean VMAF score from the libvmaf JSON log file.
+func parseVMAFFromLog(logPath string) (float64, error) {
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		return 0, fmt.Errorf("read vmaf log: %w", err)
+	}
+	var result struct {
+		PooledMetrics struct {
+			VMAF struct {
+				Mean float64 `json:"mean"`
+			} `json:"vmaf"`
+		} `json:"pooled_metrics"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return 0, fmt.Errorf("parse vmaf json: %w", err)
+	}
+	return result.PooledMetrics.VMAF.Mean, nil
+}
+
+// sourceLabel returns a short display label for a file path or presigned HTTP URL.
+func sourceLabel(input string) string {
+	if strings.HasPrefix(input, "http") {
+		parts := strings.Split(input, "/")
+		if len(parts) > 0 {
+			key := parts[len(parts)-1]
+			if idx := strings.Index(key, "?"); idx != -1 {
+				key = key[:idx]
+			}
+			return key
+		}
+	}
+	return filepath.Base(input)
 }

@@ -55,21 +55,6 @@ func buildScaleChain(params map[string]string) string {
 	return ""
 }
 
-// buildMetricPipeline constructs a GStreamer pipeline for VMAF/SSIM/PSNR analysis.
-// Timestamp slicing must be handled upstream via ffmpegTrim before calling this.
-func buildMetricPipeline(refPath, distPath string, params map[string]string) string {
-	metrics := "do-vmaf=true do-ssim=true do-psnr=true"
-	if params["vmaf"] == "false" {
-		metrics = "do-vmaf=false"
-	}
-	return fmt.Sprintf(
-		"filesrc location=%s ! decodebin ! videoconvert ! video/x-raw,format=I420 ! iqa.sink_0 "+
-			"filesrc location=%s ! decodebin ! videoconvert ! video/x-raw,format=I420 ! iqa.sink_1 "+
-			"iqa name=iqa %s ! fakesink",
-		refPath, distPath, metrics,
-	)
-}
-
 // buildSceneCutPipeline constructs a GStreamer pipeline for scene change detection.
 func buildSceneCutPipeline(inputPath string) string {
 	return fmt.Sprintf(
