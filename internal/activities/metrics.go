@@ -86,17 +86,33 @@ func (a *Activities) RemoteFileMetricAnalysis(ctx context.Context, input types.A
 	return okJSON(input.NodeID, uploadKey, report), nil
 }
 
+// scaleAlgo returns the validated ffmpeg scale algorithm name from params, defaulting to bicubic.
+// This is used in scale2ref to control the interpolation method when the distorted stream
+// must be resized to match the reference before metric computation.
+func scaleAlgo(params map[string]string) string {
+	valid := map[string]bool{
+		"bicubic": true, "bilinear": true, "fast_bilinear": true,
+		"lanczos": true, "sinc": true, "spline": true,
+		"neighbor": true, "area": true, "gauss": true,
+	}
+	if m := params["scale_method"]; valid[m] {
+		return m
+	}
+	return "bicubic"
+}
+
 // runFFmpegMetrics computes enabled metrics via ffmpeg's ssim, psnr, and libvmaf filters.
 // refInput and distInput may be local file paths or HTTP presigned URLs.
 func (a *Activities) runFFmpegMetrics(ctx context.Context, refInput, distInput, tmpDir string, params map[string]string) (*types.MetricReports, error) {
 	doVMAF := params["vmaf"] != "false"
 	doSSIM := params["ssim"] != "false"
 	doPSNR := params["psnr"] != "false"
+	algo := scaleAlgo(params)
 
 	var vmafMean, ssimAll, psnrAvg float64
 
 	if doSSIM || doPSNR {
-		s, p, err := runFFmpegSSIMPSNR(ctx, refInput, distInput, doSSIM, doPSNR)
+		s, p, err := runFFmpegSSIMPSNR(ctx, refInput, distInput, algo, doSSIM, doPSNR)
 		if err != nil {
 			return nil, fmt.Errorf("ssim/psnr: %w", err)
 		}
@@ -105,7 +121,7 @@ func (a *Activities) runFFmpegMetrics(ctx context.Context, refInput, distInput, 
 	}
 
 	if doVMAF {
-		v, err := runFFmpegVMAF(ctx, refInput, distInput, tmpDir)
+		v, err := runFFmpegVMAF(ctx, refInput, distInput, tmpDir, algo)
 		if err != nil {
 			// libvmaf is optional; degrade gracefully so the activity still succeeds.
 			a.Logger.Warn("VMAF failed (libvmaf may not be available in this ffmpeg build)", "err", err)
@@ -140,25 +156,20 @@ func (a *Activities) runFFmpegMetrics(ctx context.Context, refInput, distInput, 
 }
 
 // runFFmpegSSIMPSNR computes SSIM and/or PSNR in a single ffmpeg pass.
-// scale2ref scales the distorted stream to the reference resolution so that
-// SSIM/PSNR filters (which require identical dimensions) never fail on
-// mismatched inputs (e.g. 1920x1080 reference vs 1280x720 distorted).
-func runFFmpegSSIMPSNR(ctx context.Context, refInput, distInput string, doSSIM, doPSNR bool) (ssim, psnr float64, err error) {
+// algo is the ffmpeg scale interpolation method (e.g. "bicubic", "lanczos").
+// scale2ref resizes the distorted stream to the reference resolution before comparison.
+func runFFmpegSSIMPSNR(ctx context.Context, refInput, distInput, algo string, doSSIM, doPSNR bool) (ssim, psnr float64, err error) {
+	s2r := fmt.Sprintf("[1:v][0:v]scale2ref=flags=%s[ds][r]", algo)
 	var filter string
 	var mapArgs []string
 	if doSSIM && doPSNR {
-		// scale2ref: [to_scale][size_ref] → [scaled][ref_pass]
-		filter = "[1:v][0:v]scale2ref[ds][r];" +
-			"[r]split=2[r0][r1];" +
-			"[ds]split=2[d0][d1];" +
-			"[r0][d0]ssim[vs];" +
-			"[r1][d1]psnr[vp]"
+		filter = s2r + ";[r]split=2[r0][r1];[ds]split=2[d0][d1];[r0][d0]ssim[vs];[r1][d1]psnr[vp]"
 		mapArgs = []string{"-map", "[vs]", "-f", "null", "/dev/null", "-map", "[vp]", "-f", "null", "/dev/null"}
 	} else if doSSIM {
-		filter = "[1:v][0:v]scale2ref[ds][r];[r][ds]ssim[vs]"
+		filter = s2r + ";[r][ds]ssim[vs]"
 		mapArgs = []string{"-map", "[vs]", "-f", "null", "/dev/null"}
 	} else {
-		filter = "[1:v][0:v]scale2ref[ds][r];[r][ds]psnr[vp]"
+		filter = s2r + ";[r][ds]psnr[vp]"
 		mapArgs = []string{"-map", "[vp]", "-f", "null", "/dev/null"}
 	}
 	args := append([]string{"-y", "-i", refInput, "-i", distInput, "-filter_complex", filter}, mapArgs...)
@@ -180,12 +191,11 @@ func runFFmpegSSIMPSNR(ctx context.Context, refInput, distInput string, doSSIM, 
 }
 
 // runFFmpegVMAF runs libvmaf and returns the pooled mean VMAF score from the JSON log.
-// scale2ref ensures the distorted stream matches reference resolution before comparison.
+// algo is the ffmpeg scale interpolation method used by scale2ref.
 // libvmaf input order: [distorted][reference].
-func runFFmpegVMAF(ctx context.Context, refInput, distInput, tmpDir string) (float64, error) {
+func runFFmpegVMAF(ctx context.Context, refInput, distInput, tmpDir, algo string) (float64, error) {
 	vmafLog := filepath.Join(tmpDir, "vmaf.json")
-	// [1:v]=distorted, [0:v]=reference; scale2ref outputs [ds]=scaled_dist, [r]=ref.
-	filter := fmt.Sprintf("[1:v][0:v]scale2ref[ds][r];[ds][r]libvmaf=log_path=%s:log_fmt=json[vmafout]", vmafLog)
+	filter := fmt.Sprintf("[1:v][0:v]scale2ref=flags=%s[ds][r];[ds][r]libvmaf=log_path=%s:log_fmt=json[vmafout]", algo, vmafLog)
 	args := []string{
 		"-y", "-i", refInput, "-i", distInput,
 		"-filter_complex", filter,
