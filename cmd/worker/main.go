@@ -40,20 +40,40 @@ func main() {
 	w.RegisterWorkflow(wf.InterpreterWorkflow)
 
 	acts := &activities.Activities{
-		S3:     s3,
-		TmpDir: cfg.TempDir,
-		ApiURL: cfg.ApiURL,
-		Logger: logger,
+		S3:            s3,
+		TmpDir:        cfg.TempDir,
+		ApiURL:        cfg.ApiURL,
+		TransnetModel: cfg.TransnetModel,
+		Logger:        logger,
 	}
-	w.RegisterActivityWithOptions(acts.ResourceDownload, activity_options(types.ActivityResDownload))
-	w.RegisterActivityWithOptions(acts.ResourceUpload, activity_options(types.ActivityResUpload))
-	w.RegisterActivityWithOptions(acts.GStreamerEncode, activity_options(types.ActivityGstEncode))
-	w.RegisterActivityWithOptions(acts.GStreamerMetrics, activity_options(types.ActivityGstMetrics))
-	w.RegisterActivityWithOptions(acts.SplitVideo, activity_options(types.ActivitySplitVideo))
-	w.RegisterActivityWithOptions(acts.ConcatVideo, activity_options(types.ActivityConcatVideo))
-	w.RegisterActivityWithOptions(acts.GenerateReport, activity_options(types.ActivityGenerateReport))
-	w.RegisterActivityWithOptions(acts.FragmentedMP4Repackage, activity_options(types.ActivityFMP4Repackage))
-	w.RegisterActivityWithOptions(acts.RemoteEncodeX264, activity_options(types.ActivityRemoteEncX264))
+
+	// Storage
+	w.RegisterActivityWithOptions(acts.ResourceDownload, actOpts(types.ActivityResDownload))
+	w.RegisterActivityWithOptions(acts.ResourceUpload, actOpts(types.ActivityResUpload))
+
+	// Local processing (session-pinned)
+	w.RegisterActivityWithOptions(acts.X264Transcode, actOpts(types.ActivityX264Transcode))
+	w.RegisterActivityWithOptions(acts.FileMetricAnalysis, actOpts(types.ActivityFileMetricAnalysis))
+
+	// Remote processing
+	w.RegisterActivityWithOptions(acts.X264RemoteTranscode, actOpts(types.ActivityX264RemoteTranscode))
+	w.RegisterActivityWithOptions(acts.RemoteFileMetricAnalysis, actOpts(types.ActivityRemoteFileMetric))
+
+	// Scene detection
+	w.RegisterActivityWithOptions(acts.SceneCut, actOpts(types.ActivitySceneCut))
+	w.RegisterActivityWithOptions(acts.RemoteSceneCut, actOpts(types.ActivityRemoteSceneCut))
+	w.RegisterActivityWithOptions(acts.TransnetV2SceneCut, actOpts(types.ActivityTransnetV2SceneCut))
+
+	// Segmentation
+	w.RegisterActivityWithOptions(acts.SegmentMedia, actOpts(types.ActivitySegmentMedia))
+	w.RegisterActivityWithOptions(acts.RemoteSegmentMedia, actOpts(types.ActivityRemoteSegmentMedia))
+
+	// Utility
+	w.RegisterActivityWithOptions(acts.GenerateReport, actOpts(types.ActivityGenerateReport))
+	w.RegisterActivityWithOptions(acts.FragmentedMP4Repackage, actOpts(types.ActivityFMP4Repackage))
+
+	// Interpreter support
+	w.RegisterActivityWithOptions(acts.FetchWorkflowDAG, actOpts(types.ActivityFetchWorkflowDAG))
 
 	logger.Info("worker started", "taskQueue", types.TemporalTaskQueue, "temporal", cfg.TemporalHost)
 	if err := w.Run(worker.InterruptCh()); err != nil {
@@ -61,7 +81,7 @@ func main() {
 	}
 }
 
-func activity_options(name string) activity.RegisterOptions { //nolint
+func actOpts(name string) activity.RegisterOptions {
 	return activity.RegisterOptions{Name: name}
 }
 

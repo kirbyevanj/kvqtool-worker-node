@@ -1,14 +1,11 @@
 FROM golang:1.24 AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgstreamer1.0-dev \
-    libgstreamer-plugins-base1.0-dev \
-    pkg-config \
     git \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
-ENV GOTOOLCHAIN=auto
+ENV GOTOOLCHAIN=local
 ENV GONOSUMCHECK=github.com/kirbyevanj/*
 ENV GOPRIVATE=github.com/kirbyevanj/*
 ENV GOFLAGS=-mod=mod
@@ -18,7 +15,7 @@ COPY worker-node/ .
 
 RUN go mod edit -replace github.com/kirbyevanj/kvqtool-kvq-models=/kvq-models \
     && go mod tidy \
-    && CGO_ENABLED=1 go build -o /worker-node ./cmd/worker
+    && CGO_ENABLED=0 go build -o /worker-node ./cmd/worker
 
 FROM ubuntu:24.04
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -29,6 +26,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gstreamer1.0-plugins-ugly \
     gstreamer1.0-libav \
     ffmpeg \
+    python3 \
+    python3-pip \
+    && pip3 install --break-system-packages onnxruntime numpy \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /worker-node /worker-node

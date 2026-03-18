@@ -1,14 +1,16 @@
 module github.com/kirbyevanj/kvqtool-worker-node
 
-go 1.26.1
+go 1.24.0
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.41.4
 	github.com/aws/aws-sdk-go-v2/config v1.32.12
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.12
+	github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.22.8
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.97.1
 	github.com/kirbyevanj/kvqtool-kvq-models v0.0.0-20260317053918-6a6e3d6710f1
 	go.temporal.io/sdk v1.41.0
+	golang.org/x/sync v0.19.0
 )
 
 require (
@@ -42,7 +44,6 @@ require (
 	github.com/stretchr/testify v1.10.0 // indirect
 	go.temporal.io/api v1.62.2 // indirect
 	golang.org/x/net v0.48.0 // indirect
-	golang.org/x/sync v0.19.0 // indirect
 	golang.org/x/sys v0.41.0 // indirect
 	golang.org/x/text v0.32.0 // indirect
 	golang.org/x/time v0.3.0 // indirect
@@ -52,3 +53,5 @@ require (
 	google.golang.org/protobuf v1.36.6 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+replace github.com/kirbyevanj/kvqtool-kvq-models => ../kvq-models
