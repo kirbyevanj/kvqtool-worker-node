@@ -10,7 +10,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.97.1
 	github.com/kirbyevanj/kvqtool-kvq-models v0.0.0-20260317053918-6a6e3d6710f1
 	go.temporal.io/sdk v1.41.0
-	golang.org/x/sync v0.19.0
 )
 
 require (
@@ -44,6 +43,7 @@ require (
 	github.com/stretchr/testify v1.11.1 // indirect
 	go.temporal.io/api v1.62.2 // indirect
 	golang.org/x/net v0.48.0 // indirect
+	golang.org/x/sync v0.19.0 // indirect
 	golang.org/x/sys v0.41.0 // indirect
 	golang.org/x/text v0.32.0 // indirect
 	golang.org/x/time v0.3.0 // indirect

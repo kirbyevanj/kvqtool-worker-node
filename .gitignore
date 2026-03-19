@@ -1,0 +1,27 @@
+# Binaries
+/worker-node
+*.exe
+
+# Go build cache
+/vendor/
+
+# Test artifacts
+*.test
+*.out
+coverage.html
+coverage.out
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local env
+.env
+.env.*
+!.env.example

@@ -40,9 +40,16 @@ func (a *Activities) ResourceUpload(ctx context.Context, input types.ActivityInp
 	projectID := input.ProjectID
 	s3Key := fmt.Sprintf("projects/%s/media/%s-%s", projectID, input.NodeID, outputName)
 
-	contentType := "video/mp4"
-	if strings.HasSuffix(outputName, ".json") {
-		contentType = "application/json"
+	// Allow explicit content_type override from node params or upstream output.
+	contentType := input.Params["content_type"]
+	if contentType == "" {
+		contentType = resolveUpstreamParam(input, "content_type")
+	}
+	if contentType == "" {
+		contentType = "video/mp4"
+		if strings.HasSuffix(outputName, ".json") {
+			contentType = "application/json"
+		}
 	}
 
 	if err := a.S3.Upload(ctx, localPath, s3Key, contentType); err != nil {

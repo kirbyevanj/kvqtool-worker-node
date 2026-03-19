@@ -56,8 +56,9 @@ func (a *Activities) FileMetricAnalysis(ctx context.Context, input types.Activit
 
 	activity.RecordHeartbeat(ctx, "metrics complete")
 	return ok(input.NodeID, "", map[string]string{
-		"local_path":  reportPath,
-		"output_name": outputName,
+		"local_path":   reportPath,
+		"output_name":  outputName,
+		"content_type": "application/x-metric-report",
 	}), nil
 }
 
@@ -100,7 +101,7 @@ func (a *Activities) RemoteFileMetricAnalysis(ctx context.Context, input types.A
 	}
 	activity.RecordHeartbeat(ctx, "uploaded")
 
-	a.registerResource(ctx, input.ProjectID, reportName, uploadKey, "application/json")
+	a.registerResource(ctx, input.ProjectID, reportName, uploadKey, "application/x-metric-report")
 	return okJSON(input.NodeID, uploadKey, report), nil
 }
 
@@ -128,24 +129,32 @@ func (a *Activities) runFFmpegMetrics(ctx context.Context, refInput, distInput, 
 	algo := scaleAlgo(params)
 
 	var vmafMean, ssimAll, psnrAvg float64
+	var ssimFrames, psnrFrames, vmafFrames map[string]string
 
 	if doSSIM || doPSNR {
-		s, p, err := runFFmpegSSIMPSNR(ctx, refInput, distInput, algo, doSSIM, doPSNR)
+		sf, pf, err := runFFmpegSSIMPSNR(ctx, refInput, distInput, algo, doSSIM, doPSNR)
 		if err != nil {
 			return nil, fmt.Errorf("ssim/psnr: %w", err)
 		}
-		ssimAll = s
-		psnrAvg = p
+		ssimFrames = sf
+		psnrFrames = pf
+		if v, ok := sf["mean"]; ok {
+			ssimAll, _ = strconv.ParseFloat(v, 64)
+		}
+		if v, ok := pf["average"]; ok {
+			psnrAvg, _ = strconv.ParseFloat(v, 64)
+		}
 	}
 
 	if doVMAF {
-		v, err := runFFmpegVMAF(ctx, refInput, distInput, tmpDir, algo)
+		vf, v, err := runFFmpegVMAF(ctx, refInput, distInput, tmpDir, algo)
 		if err != nil {
 			// libvmaf is optional; degrade gracefully so the activity still succeeds.
 			a.Logger.Warn("VMAF failed (libvmaf may not be available in this ffmpeg build)", "err", err)
 			doVMAF = false
 		} else {
 			vmafMean = v
+			vmafFrames = vf
 		}
 	}
 
@@ -160,6 +169,17 @@ func (a *Activities) runFFmpegMetrics(ctx context.Context, refInput, distInput, 
 		metrics = append(metrics, "psnr")
 	}
 
+	// mergeAggregate inserts the aggregate key/value if not already present (from per-frame parse).
+	mergeAggregate := func(frames map[string]string, key, val string) map[string]string {
+		if frames == nil {
+			frames = make(map[string]string)
+		}
+		if _, ok := frames[key]; !ok {
+			frames[key] = val
+		}
+		return frames
+	}
+
 	return &types.MetricReports{
 		Header: types.MetricHeader{
 			Version:   "0.1",
@@ -167,16 +187,15 @@ func (a *Activities) runFFmpegMetrics(ctx context.Context, refInput, distInput, 
 			Reference: sourceLabel(refInput),
 			Dist:      map[string]string{"0": sourceLabel(distInput)},
 		},
-		Vmaf: map[string]map[string]string{"0": {"mean": fmt.Sprintf("%.4f", vmafMean)}},
-		Ssim: map[string]map[string]string{"0": {"mean": fmt.Sprintf("%.6f", ssimAll)}},
-		Psnr: map[string]map[string]string{"0": {"average": fmt.Sprintf("%.4f", psnrAvg)}},
+		Vmaf: map[string]map[string]string{"0": mergeAggregate(vmafFrames, "mean", fmt.Sprintf("%.4f", vmafMean))},
+		Ssim: map[string]map[string]string{"0": mergeAggregate(ssimFrames, "mean", fmt.Sprintf("%.6f", ssimAll))},
+		Psnr: map[string]map[string]string{"0": mergeAggregate(psnrFrames, "average", fmt.Sprintf("%.4f", psnrAvg))},
 	}, nil
 }
 
 // runFFmpegSSIMPSNR computes SSIM and/or PSNR in a single ffmpeg pass.
-// algo is the ffmpeg scale interpolation method (e.g. "bicubic", "lanczos").
-// scale2ref resizes the distorted stream to the reference resolution before comparison.
-func runFFmpegSSIMPSNR(ctx context.Context, refInput, distInput, algo string, doSSIM, doPSNR bool) (ssim, psnr float64, err error) {
+// Returns per-frame data as string maps (frame index → value) with aggregate keys "mean"/"average".
+func runFFmpegSSIMPSNR(ctx context.Context, refInput, distInput, algo string, doSSIM, doPSNR bool) (ssimFrames, psnrFrames map[string]string, err error) {
 	s2r := fmt.Sprintf("[1:v][0:v]scale2ref=flags=%s[ds][r]", algo)
 	var filter string
 	var mapArgs []string
@@ -195,23 +214,25 @@ func runFFmpegSSIMPSNR(ctx context.Context, refInput, distInput, algo string, do
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = &stderrBuf
 	if runErr := cmd.Run(); runErr != nil {
-		return 0, 0, fmt.Errorf("ffmpeg: %w: %s", runErr, stderrBuf.String())
+		return nil, nil, fmt.Errorf("ffmpeg: %w: %s", runErr, stderrBuf.String())
 	}
 
 	out := stderrBuf.String()
+	ssimFrames = make(map[string]string)
+	psnrFrames = make(map[string]string)
 	if doSSIM {
-		ssim = parseSSIMFromStderr(out)
+		ssimFrames = parseSSIMFrames(out)
 	}
 	if doPSNR {
-		psnr = parsePSNRFromStderr(out)
+		psnrFrames = parsePSNRFrames(out)
 	}
-	return ssim, psnr, nil
+	return ssimFrames, psnrFrames, nil
 }
 
-// runFFmpegVMAF runs libvmaf and returns the pooled mean VMAF score from the JSON log.
+// runFFmpegVMAF runs libvmaf and returns per-frame scores plus the pooled mean.
 // algo is the ffmpeg scale interpolation method used by scale2ref.
 // libvmaf input order: [distorted][reference].
-func runFFmpegVMAF(ctx context.Context, refInput, distInput, tmpDir, algo string) (float64, error) {
+func runFFmpegVMAF(ctx context.Context, refInput, distInput, tmpDir, algo string) (map[string]string, float64, error) {
 	vmafLog := filepath.Join(tmpDir, "vmaf.json")
 	filter := fmt.Sprintf("[1:v][0:v]scale2ref=flags=%s[ds][r];[ds][r]libvmaf=log_path=%s:log_fmt=json[vmafout]", algo, vmafLog)
 	args := []string{
@@ -224,44 +245,61 @@ func runFFmpegVMAF(ctx context.Context, refInput, distInput, tmpDir, algo string
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = &stderrBuf
 	if runErr := cmd.Run(); runErr != nil {
-		return 0, fmt.Errorf("ffmpeg vmaf: %w: %s", runErr, stderrBuf.String())
+		return nil, 0, fmt.Errorf("ffmpeg vmaf: %w: %s", runErr, stderrBuf.String())
 	}
 	return parseVMAFFromLog(vmafLog)
 }
 
-// parseSSIMFromStderr extracts the all-channel SSIM mean from ffmpeg stderr.
-// ffmpeg prints: "SSIM Mean Y:0.987654 (18.97) ... All:0.989123 (19.58)"
-var ssimAllRe = regexp.MustCompile(`\bAll:(\d+\.\d+)`)
+// parseSSIMFrames extracts per-frame SSIM (All channel) from ffmpeg stderr.
+// Per-frame line: "SSIM [N] Y:... All:0.989123 (...)"
+// Aggregate line: "SSIM Mean Y:... All:0.989123 (...)"
+// Returns map: frame index string → value string, plus "mean" key for aggregate.
+var ssimFrameRe = regexp.MustCompile(`SSIM \[(\d+)\][^\n]*\bAll:(\d+\.\d+)`)
+var ssimMeanRe = regexp.MustCompile(`SSIM Mean[^\n]*\bAll:(\d+\.\d+)`)
 
-func parseSSIMFromStderr(s string) float64 {
-	m := ssimAllRe.FindStringSubmatch(s)
-	if len(m) < 2 {
-		return 0
+func parseSSIMFrames(s string) map[string]string {
+	m := make(map[string]string)
+	for _, match := range ssimFrameRe.FindAllStringSubmatch(s, -1) {
+		m[match[1]] = match[2]
 	}
-	v, _ := strconv.ParseFloat(m[1], 64)
-	return v
+	if agg := ssimMeanRe.FindStringSubmatch(s); len(agg) >= 2 {
+		m["mean"] = agg[1]
+	}
+	return m
 }
 
-// parsePSNRFromStderr extracts the average PSNR from ffmpeg stderr.
-// ffmpeg prints: "PSNR y:43.97 ... average:44.80 min:38.43 max:68.07"
-var psnrAvgRe = regexp.MustCompile(`\baverage:(\d+\.\d+)`)
+// parsePSNRFrames extracts per-frame PSNR average from ffmpeg stderr.
+// Per-frame line: "PSNR [N] y:... average:44.80 ..."
+// Aggregate line: "PSNR y:... average:44.80 ..."
+// Returns map: frame index string → value string, plus "average" key.
+var psnrFrameRe = regexp.MustCompile(`PSNR \[(\d+)\][^\n]*\baverage:(\d+\.\d+)`)
+var psnrMeanRe = regexp.MustCompile(`PSNR y:[^\n]*\baverage:(\d+\.\d+)`)
 
-func parsePSNRFromStderr(s string) float64 {
-	m := psnrAvgRe.FindStringSubmatch(s)
-	if len(m) < 2 {
-		return 0
+func parsePSNRFrames(s string) map[string]string {
+	m := make(map[string]string)
+	for _, match := range psnrFrameRe.FindAllStringSubmatch(s, -1) {
+		m[match[1]] = match[2]
 	}
-	v, _ := strconv.ParseFloat(m[1], 64)
-	return v
+	if agg := psnrMeanRe.FindStringSubmatch(s); len(agg) >= 2 {
+		m["average"] = agg[1]
+	}
+	return m
 }
 
-// parseVMAFFromLog reads the pooled mean VMAF score from the libvmaf JSON log file.
-func parseVMAFFromLog(logPath string) (float64, error) {
+// parseVMAFFromLog reads per-frame VMAF scores and pooled mean from the libvmaf JSON log.
+// Returns frames map (frame index → score string), mean float, and any parse error.
+func parseVMAFFromLog(logPath string) (map[string]string, float64, error) {
 	data, err := os.ReadFile(logPath)
 	if err != nil {
-		return 0, fmt.Errorf("read vmaf log: %w", err)
+		return nil, 0, fmt.Errorf("read vmaf log: %w", err)
 	}
 	var result struct {
+		Frames []struct {
+			FrameNum int `json:"frameNum"`
+			Metrics  struct {
+				VMAF float64 `json:"vmaf"`
+			} `json:"metrics"`
+		} `json:"frames"`
 		PooledMetrics struct {
 			VMAF struct {
 				Mean float64 `json:"mean"`
@@ -269,9 +307,15 @@ func parseVMAFFromLog(logPath string) (float64, error) {
 		} `json:"pooled_metrics"`
 	}
 	if err := json.Unmarshal(data, &result); err != nil {
-		return 0, fmt.Errorf("parse vmaf json: %w", err)
+		return nil, 0, fmt.Errorf("parse vmaf json: %w", err)
 	}
-	return result.PooledMetrics.VMAF.Mean, nil
+	frames := make(map[string]string, len(result.Frames))
+	for _, f := range result.Frames {
+		frames[strconv.Itoa(f.FrameNum)] = fmt.Sprintf("%.4f", f.Metrics.VMAF)
+	}
+	mean := result.PooledMetrics.VMAF.Mean
+	frames["mean"] = fmt.Sprintf("%.4f", mean)
+	return frames, mean, nil
 }
 
 // sourceLabel returns a short display label for a file path or presigned HTTP URL.
